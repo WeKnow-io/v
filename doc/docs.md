@@ -1269,37 +1269,49 @@ does not alter the parent:
 
 ```v
 mut a := [0, 1, 2, 3, 4, 5]
-mut b := a[2..4]
-b[0] = 7 // `b[0]` is referring to `a[2]`
-println(a) // `[0, 1, 7, 3, 4, 5]`
+
+// Create a slice, that reuses the *same memory* as the parent array
+// initially, without doing a new allocation:
+mut b := unsafe { a[2..4] } // the contents of `b`, reuses the memory, used by the contents of `a`.
+
+b[0] = 7 // Note that `b[0]` and `a[2]` refer to *the same element* in memory.
+println(a) // `[0, 1, 7, 3, 4, 5]` - changing `b[0]` above, changed `a[2]` too.
+
+// the content of `b` will get reallocated, to have room for the `9` element:
 b << 9
-// `b` has been reallocated and is now independent from `a`
-println(a) // `[0, 1, 7, 3, 4, 5]` - no change
-println(b) // `[7, 3, 9]`
+// The content of `b`, is now reallocated, and fully independent from the content of `a`.
+
+println(a) // `[0, 1, 7, 3, 4, 5]` - no change, since the content of `b` was reallocated,
+// to a larger block, before the appending.
+
+println(b) // `[7, 3, 9]` - the contents of `b`, after the reallocation, and appending of the `9`.
 ```
 
-Appending to the parent array may or may not make it independent from its child slices.
-The behaviour depends on the parent's capacity and is predictable:
+Appending to the parent array, may or may not make it independent from its child slices.
+The behaviour depends on the *parent's capacity* and is predictable:
 
 ```v
 mut a := []int{len: 5, cap: 6, init: 2}
-mut b := unsafe { a[1..4] }
+mut b := unsafe { a[1..4] } // the contents of `b` uses part of the same memory, that is used by `a` too
+
 a << 3
-// no reallocation - fits in `cap`
-b[2] = 13 // `a[3]` is modified
+// still no reallocation of `a`, since `a.len` still fits in `a.cap`
+b[2] = 13 // `a[3]` is modified, through the slice `b`.
+
 a << 4
-// a has been reallocated and is now independent from `b` (`cap` was exceeded)
+// the content of `a` has been reallocated now, and is independent from `b` (`cap` was exceeded by `len`)
 b[1] = 3 // no change in `a`
+
 println(a) // `[2, 2, 2, 13, 2, 3, 4]`
 println(b) // `[2, 3, 13]`
 ```
 
-You can call .clone() on the slice, if you do want to have an independent copy right away:
+You can call .clone() on the slice, if you *do* want to have an independent copy right away:
 
 ```v
 mut a := [0, 1, 2, 3, 4, 5]
 mut b := a[2..4].clone()
-b[0] = 7 // Note: `b[0]` is NOT referring to `a[2]`, as it would have been, without the .clone()
+b[0] = 7 // Note: `b[0]` is NOT referring to `a[2]`, as it would have been, without the `.clone()`
 println(a) // [0, 1, 2, 3, 4, 5]
 println(b) // [7, 3]
 ```
@@ -2066,7 +2078,7 @@ from `low` up to *but not including* `high`.
 > This exclusive range notation and zero-based indexing follow principles of
 logical consistency and error reduction. As Edsger W. Dijkstra outlines in
 'Why Numbering Should Start at Zero'
-([EWD831](https://www.cs.utexas.edu/users/EWD/transcriptions/EWD08xx/EWD831.html)), 
+([EWD831](https://www.cs.utexas.edu/users/EWD/transcriptions/EWD08xx/EWD831.html)),
 zero-based indexing aligns the index with the preceding elements in a sequence,
 simplifying handling and minimizing errors, especially with adjacent subsequences.
 This logical and efficient approach shapes our language design, emphasizing clarity
@@ -3973,6 +3985,11 @@ fn main() {
 	println(user.name) // "Charles"
 
 	user2 := repo.find_user_by_id2(10) or { return }
+
+	// To create an Option var directly:
+	my_optional_int := ?int(none)
+	my_optional_string := ?string(none)
+	my_optional_user := ?User(none)
 }
 ```
 
@@ -5833,10 +5850,10 @@ fn main() {
 
 You can read [Enum](#enums) values and their attributes.
 
-```V
+```v
 enum Color {
-	red @[RED] // first attribute
-	blue @[BLUE] // second attribute
+	red  @[RED] // first attribute
+	blue  @[BLUE] // second attribute
 }
 
 fn main() {
@@ -5857,7 +5874,7 @@ fn main() {
 
 You can read [Struct](#structs) attributes.
 
-```V
+```v
 @[COLOR]
 struct Foo {
 	a int
@@ -5882,7 +5899,7 @@ fn main() {
 
 You can read variant types from [Sum type](#sum-types).
 
-```V
+```v
 type MySum = int | string
 
 fn main() {
@@ -5904,7 +5921,7 @@ fn main() {
 
 You can retrieve information about struct methods.
 
-```V
+```v
 struct Foo {
 }
 
@@ -5915,7 +5932,6 @@ fn (f Foo) test() int {
 fn (f Foo) test2() string {
 	return 'foo'
 }
-
 
 fn main() {
 	foo := Foo{}
@@ -6104,6 +6120,67 @@ V can bring in values at compile time from environment variables.
 `$env('ENV_VAR')` can also be used in top-level `#flag` and `#include` statements:
 `#flag linux -I $env('JAVA_HOME')/include`.
 
+#### `$d`
+
+V can bring in values at compile time from `-d ident=value` flag defines, passed on
+the command line to the compiler. You can also pass `-d ident`, which will have the
+same meaning as passing `-d ident=true`.
+
+To get the value in your code, use: `$d('ident', default)`, where `default`
+can be `false` for booleans, `0` or `123` for i64 numbers, `0.0` or `113.0`
+for f64 numbers, `'a string'` for strings.
+
+When a flag is not provided via the command line, `$d()` will return the `default`
+value provided as the *second* argument.
+
+```v
+module main
+
+const my_i64 = $d('my_i64', 1024)
+
+fn main() {
+	compile_time_value := $d('my_string', 'V')
+	println(compile_time_value)
+	println(my_i64)
+}
+```
+
+Running the above with `v run .` will output:
+```
+V
+1024
+```
+
+Running the above with `v -d my_i64=4096 -d my_string="V rocks" run .` will output:
+```
+V rocks
+4096
+```
+
+Here is an example of how to use the default values, which have to be *pure* literals:
+```v
+fn main() {
+	val_str := $d('id_str', 'value') // can be changed by providing `-d id_str="my id"`
+	val_f64 := $d('id_f64', 42.0) // can be changed by providing `-d id_f64=84.0`
+	val_i64 := $d('id_i64', 56) // can be changed by providing `-d id_i64=123`
+	val_bool := $d('id_bool', false) // can be changed by providing `-d id_bool=true`
+	val_char := $d('id_char', `f`) // can be changed by providing `-d id_char=v`
+	println(val_str)
+	println(val_f64)
+	println(val_i64)
+	println(val_bool)
+	println(rune(val_char))
+}
+```
+
+`$d('ident','value')` can also be used in top-level statements like `#flag` and `#include`:
+`#flag linux -I $d('my_include','/usr')/include`. The default value for `$d` when used in these
+statements should be literal `string`s.
+
+`$d('ident', false)` can also be used inside `$if $d('ident', false) {` statements,
+granting you the ability to selectively turn on/off certain sections of code, at compile
+time, without modifying your source code, or keeping different versions of it.
+
 #### `$compile_error` and `$compile_warn`
 
 These two comptime functions are very useful for displaying custom errors/warnings during
@@ -6225,28 +6302,28 @@ See also [Cross Compilation](#cross-compilation).
 
 ## Debugger
 
-To use the native *V debugger*, add the `$dbg` statement to your source, where you 
+To use the native *V debugger*, add the `$dbg` statement to your source, where you
 want the debugger to be invoked.
 
-```V
+```v
 fn main() {
 	a := 1
-	$dbg
+	$dbg;
 }
 ```
 
-Running this V code, you will get the debugger REPL break when the execution 
+Running this V code, you will get the debugger REPL break when the execution
 reaches the `$dbg` statement.
 
 ```
 $ v run example.v
 Break on [main] main in example.v:3
-example.v:3 vdbg> 
+example.v:3 vdbg>
 ```
 
 At this point, execution is halted, and the debugger is now available.
 
-To see the available commands, type 
+To see the available commands, type
 ?, h or help. (Completion for commands works - Non-Windows only)
 
 ```
@@ -6312,7 +6389,7 @@ example.v:3 vdbg> l
 0005  }
 ```
 
-The default is read 3 lines before and 3 lines after, but you can 
+The default is read 3 lines before and 3 lines after, but you can
 pass a parameter to the command to read more lines, like `l 5`.
 
 Now, lets watch the variable changing on this loop.
@@ -6332,21 +6409,21 @@ i = 1 (int)
 
 `i` and it's value is automatically printed, because it is in the watch list.
 
-To repeat the last command issued, in this case the `c` command, 
+To repeat the last command issued, in this case the `c` command,
 just hit the *enter* key.
 
 ```
-example.v:3 vdbg> 
+example.v:3 vdbg>
 Break on [main] main in example.v:3
 i = 2 (int)
-example.v:3 vdbg> 
+example.v:3 vdbg>
 Break on [main] main in example.v:3
 i = 3 (int)
 example.v:3 vdbg>
 ```
 
 You can also see memory usage with `mem` or `memory` command, and
-check if the current context is an anon function (`anon?`), a method (`method?`) 
+check if the current context is an anon function (`anon?`), a method (`method?`)
 or a generic method (`generic?`) and clear the terminal window (`clear`).
 
 ## Call stack
@@ -6388,7 +6465,7 @@ example.v:5    |   > main.test
 
 ## Trace
 
-Another feature of `v.debug` is the possibility to add hook functions 
+Another feature of `v.debug` is the possibility to add hook functions
 before and after each function call.
 
 To enable this feature, add the `-d trace` switch when building or running
@@ -7602,10 +7679,10 @@ sh('ls')
 
 Now you can either compile this like a normal V program and get an executable you can deploy and run
 anywhere:
-`v deploy.vsh && ./deploy`
+`v -skip-running deploy.vsh && ./deploy`
 
-Or just run it more like a traditional Bash script:
-`v run deploy.vsh`
+Or run it like a traditional Bash script:
+`v run deploy.vsh` (or simply just `v deploy.vsh`)
 
 On Unix-like platforms, the file can be run directly after making it executable using `chmod +x`:
 `./deploy.vsh`
@@ -7715,4 +7792,5 @@ Assignment Operators
 +=   -=   *=   /=   %=
 &=   |=   ^=
 >>=  <<=  >>>=
+&&= ||=
 ```

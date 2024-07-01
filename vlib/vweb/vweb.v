@@ -142,6 +142,7 @@ pub const mime_types = {
 	'.3gp':    'video/3gpp'
 	'.3g2':    'video/3gpp2'
 	'.7z':     'application/x-7z-compressed'
+	'.m3u8':   'application/vnd.apple.mpegurl'
 }
 pub const max_http_post_size = 1024 * 1024
 pub const default_port = 8080
@@ -153,11 +154,10 @@ mut:
 	content_type string = 'text/plain'
 	status       string = '200 OK'
 	ctx          context.Context = context.EmptyContext{}
-pub:
+pub mut:
 	// HTTP Request
 	req http.Request
 	// TODO: Response
-pub mut:
 	done bool
 	// time.ticks() from start of vweb connection handle.
 	// You can use it to determine how much time is spent on your request.

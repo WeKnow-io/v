@@ -403,8 +403,13 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		&& (node.stmts.len == 0 || node.stmts.last() !is ast.Return) {
 		sym := c.table.sym(node.return_type)
 		if sym.kind == .void {
+			return_pos := if node.stmts.len == 0 {
+				node.pos
+			} else {
+				node.stmts.last().pos
+			}
 			node.stmts << ast.Return{
-				pos: node.pos
+				pos: return_pos // node.pos
 			}
 		}
 	}
@@ -595,7 +600,7 @@ fn (mut c Checker) call_expr(mut node ast.CallExpr) ast.Type {
 		}
 	}
 	c.expected_or_type = node.return_type.clear_flag(.result)
-	c.stmts_ending_with_expression(mut node.or_block.stmts)
+	c.stmts_ending_with_expression(mut node.or_block.stmts, c.expected_or_type)
 	c.expected_or_type = ast.void_type
 
 	if !c.inside_const && c.table.cur_fn != unsafe { nil } && !c.table.cur_fn.is_main
@@ -1430,6 +1435,14 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 					continue
 				}
 			}
+			// if first_sym.name == 'VContext' && f.params[0].name == 'ctx' { // TODO use int comparison for perf
+			//}
+			/*
+			if param_typ_sym.info is ast.Struct && param_typ_sym.name == 'VContext' {
+				c.note('ok', call_arg.pos)
+				continue
+			}
+			*/
 			c.error('${err.msg()} in argument ${i + 1} to `${fn_name}`', call_arg.pos)
 		}
 		if final_param_sym.kind == .struct_ && arg_typ !in [ast.voidptr_type, ast.nil_type]
@@ -1495,6 +1508,9 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 			concrete_types)
 	} else {
 		node.return_type = func.return_type
+	}
+	if func.return_type.has_flag(.generic) {
+		node.return_type_generic = func.return_type
 	}
 	if node.concrete_types.len > 0 && func.return_type != 0 && c.table.cur_fn != unsafe { nil }
 		&& c.table.cur_fn.generic_names.len == 0 {
@@ -1569,6 +1585,27 @@ fn (mut c Checker) register_trace_call(node ast.CallExpr, func ast.Fn) {
 	}
 }
 
+// is_generic_expr checks if the expr relies on fn generic argument
+fn (mut c Checker) is_generic_expr(node ast.Expr) bool {
+	return match node {
+		ast.Ident {
+			c.comptime.is_generic_param_var(node)
+		}
+		ast.IndexExpr {
+			c.comptime.is_generic_param_var(node.left)
+		}
+		ast.CallExpr {
+			node.args.any(c.comptime.is_generic_param_var(it.expr))
+		}
+		ast.SelectorExpr {
+			c.comptime.is_generic_param_var(node.expr)
+		}
+		else {
+			false
+		}
+	}
+}
+
 fn (mut c Checker) resolve_comptime_args(func ast.Fn, node_ ast.CallExpr, concrete_types []ast.Type) map[int]ast.Type {
 	mut comptime_args := map[int]ast.Type{}
 	has_dynamic_vars := (c.table.cur_fn != unsafe { nil } && c.table.cur_fn.generic_names.len > 0)
@@ -1582,14 +1619,14 @@ fn (mut c Checker) resolve_comptime_args(func ast.Fn, node_ ast.CallExpr, concre
 			} else {
 				func.params[offset + i]
 			}
-			k++
 			if !param.typ.has_flag(.generic) {
 				continue
 			}
+			k++
 			param_typ := param.typ
 			if call_arg.expr is ast.Ident {
 				if call_arg.expr.obj is ast.Var {
-					if call_arg.expr.obj.ct_type_var !in [.generic_param, .no_comptime] {
+					if call_arg.expr.obj.ct_type_var !in [.generic_var, .generic_param, .no_comptime] {
 						mut ctyp := c.comptime.get_comptime_var_type(call_arg.expr)
 						if ctyp != ast.void_type {
 							arg_sym := c.table.sym(ctyp)
@@ -1782,6 +1819,19 @@ fn (mut c Checker) check_type_and_visibility(name string, type_idx int, expected
 }
 
 fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
+	// `(if true { 'foo.bar' } else { 'foo.bar.baz' }).all_after('foo.')`
+	mut left_expr := node.left
+	for mut left_expr is ast.ParExpr {
+		left_expr = left_expr.expr
+	}
+	if mut left_expr is ast.IfExpr {
+		if left_expr.branches.len > 0 && left_expr.has_else {
+			mut last_stmt := left_expr.branches[0].stmts.last()
+			if mut last_stmt is ast.ExprStmt {
+				c.expected_type = c.expr(mut last_stmt.expr)
+			}
+		}
+	}
 	left_type := c.expr(mut node.left)
 	if left_type == ast.void_type {
 		c.error('cannot call a method using an invalid expression', node.pos)
@@ -2146,6 +2196,9 @@ fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 	node.is_noreturn = method.is_noreturn
 	node.is_ctor_new = method.is_ctor_new
 	node.return_type = method.return_type
+	if method.return_type.has_flag(.generic) {
+		node.return_type_generic = method.return_type
+	}
 	if !method.is_pub && method.mod != c.mod {
 		// If a private method is called outside of the module
 		// its receiver type is defined in, show an error.
@@ -2639,6 +2692,7 @@ fn (mut c Checker) check_expected_arg_count(mut node ast.CallExpr, f &ast.Fn) ! 
 	}
 	if nr_args < min_required_params {
 		if min_required_params == nr_args + 1 {
+			// params struct?
 			last_typ := f.params.last().typ
 			last_sym := c.table.sym(last_typ)
 			if last_sym.info is ast.Struct {
@@ -2653,6 +2707,19 @@ fn (mut c Checker) check_expected_arg_count(mut node ast.CallExpr, f &ast.Fn) ! 
 					return
 				}
 			}
+			// Implicit context first arg?
+			/*
+			first_typ := f.params[0].typ
+			first_sym := c.table.sym(first_typ)
+			if first_sym.info is ast.Struct {
+				if c.fileis('a.v') {
+					if first_sym.name == 'VContext' && f.params[0].name == 'ctx' { // TODO use int comparison for perf
+						// c.error('got ctx ${first_sym.name}', node.pos)
+						return
+					}
+				}
+			}
+			*/
 		}
 		c.error('expected ${min_required_params} arguments, but got ${nr_args}', node.pos)
 		return error('')

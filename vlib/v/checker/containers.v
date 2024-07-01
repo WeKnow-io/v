@@ -8,6 +8,9 @@ import v.token
 fn (mut c Checker) array_init(mut node ast.ArrayInit) ast.Type {
 	mut elem_type := ast.void_type
 	unwrap_elem_type := c.unwrap_generic(node.elem_type)
+	if c.pref.warn_about_allocs {
+		c.warn_alloc('array initialization', node.pos)
+	}
 	// `x := []string{}` (the type was set in the parser)
 	if node.typ != ast.void_type {
 		if node.elem_type != 0 {
@@ -304,6 +307,20 @@ fn (mut c Checker) eval_array_fixed_sizes(mut size_expr ast.Expr, size int, elem
 		match mut size_expr {
 			ast.IntegerLiteral {
 				fixed_size = size_expr.val.int()
+			}
+			ast.ComptimeCall {
+				if size_expr.is_compile_value {
+					size_expr.resolve_compile_value(c.pref.compile_values) or {
+						c.error(err.msg(), size_expr.pos)
+					}
+					if size_expr.result_type != ast.i64_type {
+						c.error('value from \$d() can only be positive integers when used as fixed size',
+							size_expr.pos)
+					}
+					fixed_size = size_expr.compile_value.int()
+				} else {
+					c.error('only \$d() can be used for fixed size arrays', size_expr.pos)
+				}
 			}
 			ast.CastExpr {
 				if !size_expr.typ.is_pure_int() {

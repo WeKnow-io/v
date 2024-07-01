@@ -44,6 +44,8 @@ fn test_ends_with() {
 fn test_between() {
 	s := 'hello [man] how you doing'
 	assert s.find_between('[', ']') == 'man'
+	assert s.find_between('[', 'A') == ''
+	assert s.find_between('A', ']') == ''
 }
 
 fn test_compare() {
@@ -1490,7 +1492,7 @@ fn test_index_u8() {
 	//
 }
 
-fn test_index_last() {
+fn test_last_index() {
 	assert 'abcabca'.last_index('ca')? == 5
 	assert 'abcabca'.last_index('ab')? == 3
 	assert 'abcabca'.last_index('b')? == 4
@@ -1500,16 +1502,16 @@ fn test_index_last() {
 	// TODO: `assert 'Zabcabca'.index_last('Y') == none` is a cgen error, 2023/12/04
 }
 
-fn test_index_u8_last() {
-	assert 'abcabca'.index_u8_last(`a`) == 6
-	assert 'abcabca'.index_u8_last(`c`) == 5
-	assert 'abcabca'.index_u8_last(`b`) == 4
-	assert 'Zabcabca'.index_u8_last(`Z`) == 0
+fn test_last_index_u8() {
+	assert 'abcabca'.last_index_u8(`a`) == 6
+	assert 'abcabca'.last_index_u8(`c`) == 5
+	assert 'abcabca'.last_index_u8(`b`) == 4
+	assert 'Zabcabca'.last_index_u8(`Z`) == 0
 	//
-	assert 'abc'.index_u8(`d`) == -1
-	assert 'abc'.index_u8(`A`) == -1
-	assert 'abc'.index_u8(`B`) == -1
-	assert 'abc'.index_u8(`C`) == -1
+	assert 'abc'.last_index_u8(`d`) == -1
+	assert 'abc'.last_index_u8(`A`) == -1
+	assert 'abc'.last_index_u8(`B`) == -1
+	assert 'abc'.last_index_u8(`C`) == -1
 }
 
 fn test_contains_byte() {
@@ -1518,4 +1520,29 @@ fn test_contains_byte() {
 	assert 'abc abca'.contains_u8(`c`)
 	assert 'abc abca'.contains_u8(` `)
 	assert !'abc abca'.contains_u8(`A`)
+}
+
+fn test_camel_to_snake() {
+	assert 'Abcd'.camel_to_snake() == 'abcd'
+	assert 'aBcd'.camel_to_snake() == 'a_bcd'
+	assert 'AAbb'.camel_to_snake() == 'aa_bb'
+	assert 'aaBB'.camel_to_snake() == 'aa_bb'
+	assert 'aaBbCcDD'.camel_to_snake() == 'aa_bb_cc_dd'
+	assert 'AAbbCC'.camel_to_snake() == 'aa_bb_cc'
+	assert 'aaBBcc'.camel_to_snake() == 'aa_bb_cc'
+	assert 'aa_BB'.camel_to_snake() == 'aa_bb'
+	assert 'aa__BB'.camel_to_snake() == 'aa__bb'
+	assert 'JVM_PUBLIC_ACC'.camel_to_snake() == 'jvm_public_acc'
+	assert '_ISspace'.camel_to_snake() == '_is_space'
+	assert '_aBcd'.camel_to_snake() == '_a_bcd'
+	assert '_a_Bcd'.camel_to_snake() == '_a_bcd'
+	assert '_AbCDe_'.camel_to_snake() == '_ab_cd_e_'
+}
+
+fn test_snake_to_camel() {
+	assert 'abcd'.snake_to_camel() == 'Abcd'
+	assert 'ab_cd'.snake_to_camel() == 'AbCd'
+	assert 'ab_cd_efg'.snake_to_camel() == 'AbCdEfg'
+	assert '_abcd'.snake_to_camel() == 'Abcd'
+	assert '_abcd_'.snake_to_camel() == 'Abcd'
 }

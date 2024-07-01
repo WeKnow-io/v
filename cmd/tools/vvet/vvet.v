@@ -118,6 +118,9 @@ fn (mut vt Vet) vet_file(path string) {
 
 // vet_line vets the contents of `line` from `vet.file`.
 fn (mut vt Vet) vet_line(lines []string, line string, lnumber int) {
+	if line == '' {
+		return
+	}
 	vt.vet_fn_documentation(lines, line, lnumber)
 	vt.vet_space_usage(line, lnumber)
 }
@@ -143,6 +146,33 @@ fn (mut vt Vet) vet_space_usage(line string, lnumber int) {
 	}
 }
 
+fn collect_tags(line string) []string {
+	mut cleaned := line.all_before('/')
+	cleaned = cleaned.replace_each(clean_seq)
+	return cleaned.split(',')
+}
+
+fn ident_fn_name(line string) string {
+	mut fn_idx := line.index(' fn ') or { return '' }
+	if line.len < fn_idx + 5 {
+		return ''
+	}
+	mut tokens := line[fn_idx + 4..].split(' ')
+	// Skip struct identifier
+	if tokens.first().starts_with('(') {
+		fn_idx = line.index(')') or { return '' }
+		tokens = line[fn_idx..].split(' ')
+		if tokens.len > 1 {
+			tokens = [tokens[1]]
+		}
+	}
+	if tokens.len > 0 {
+		function_name_with_generic_parameters := tokens[0].all_before('(')
+		return function_name_with_generic_parameters.all_before('[')
+	}
+	return ''
+}
+
 // vet_fn_documentation ensures that functions are documented
 fn (mut vt Vet) vet_fn_documentation(lines []string, line string, lnumber int) {
 	if line.starts_with('fn C.') {
@@ -160,91 +190,64 @@ fn (mut vt Vet) vet_fn_documentation(lines []string, line string, lnumber int) {
 		return
 	}
 	// Scan function declarations for missing documentation
-	if lnumber > 0 {
-		collect_tags := fn (line string) []string {
-			mut cleaned := line.all_before('/')
-			cleaned = cleaned.replace_each(clean_seq)
-			return cleaned.split(',')
+	mut line_above := lines[lnumber - 1] or { return }
+	mut tags := []string{}
+	if !line_above.starts_with('//') {
+		mut grab := true
+		for j := lnumber - 1; j >= 0; j-- {
+			prev_line := lines[j]
+			if prev_line.contains('}') { // We've looked back to the above scope, stop here
+				break
+			} else if prev_line.starts_with('[') {
+				tags << collect_tags(prev_line)
+				continue
+			} else if prev_line.starts_with('//') { // Single-line comment
+				grab = false
+				break
+			}
 		}
-		ident_fn_name := fn (line string) string {
-			mut fn_idx := line.index(' fn ') or { return '' }
-			if line.len < fn_idx + 5 {
-				return ''
-			}
-			mut tokens := line[fn_idx + 4..].split(' ')
-			// Skip struct identifier
-			if tokens.first().starts_with('(') {
-				fn_idx = line.index(')') or { return '' }
-				tokens = line[fn_idx..].split(' ')
-				if tokens.len > 1 {
-					tokens = [tokens[1]]
-				}
-			}
-			if tokens.len > 0 {
-				function_name_with_generic_parameters := tokens[0].all_before('(')
-				return function_name_with_generic_parameters.all_before('[')
-			}
-			return ''
+		if grab {
+			clean_line := line.all_before_last('{').trim(' ')
+			vt.warn('Function documentation seems to be missing for "${clean_line}".',
+				lnumber, .doc)
 		}
-		mut line_above := lines[lnumber - 1]
-		mut tags := []string{}
-		if !line_above.starts_with('//') {
-			mut grab := true
-			for j := lnumber - 1; j >= 0; j-- {
-				prev_line := lines[j]
-				if prev_line.contains('}') { // We've looked back to the above scope, stop here
-					break
-				} else if prev_line.starts_with('[') {
-					tags << collect_tags(prev_line)
-					continue
-				} else if prev_line.starts_with('//') { // Single-line comment
+	} else {
+		fn_name := ident_fn_name(line)
+		mut grab := true
+		for j := lnumber - 1; j >= 0; j-- {
+			mut prev_prev_line := ''
+			if j - 1 >= 0 {
+				prev_prev_line = lines[j - 1]
+			}
+			prev_line := lines[j]
+
+			if prev_line.starts_with('//') {
+				if prev_line.starts_with('// ${fn_name} ') {
 					grab = false
 					break
-				}
-			}
-			if grab {
-				clean_line := line.all_before_last('{').trim(' ')
-				vt.warn('Function documentation seems to be missing for "${clean_line}".',
-					lnumber, .doc)
-			}
-		} else {
-			fn_name := ident_fn_name(line)
-			mut grab := true
-			for j := lnumber - 1; j >= 0; j-- {
-				mut prev_prev_line := ''
-				if j - 1 >= 0 {
-					prev_prev_line = lines[j - 1]
-				}
-				prev_line := lines[j]
-
-				if prev_line.starts_with('//') {
-					if prev_line.starts_with('// ${fn_name} ') {
-						grab = false
-						break
-					} else if prev_line.starts_with('// ${fn_name}')
-						&& !prev_prev_line.starts_with('//') {
-						grab = false
-						clean_line := line.all_before_last('{').trim(' ')
-						vt.warn('The documentation for "${clean_line}" seems incomplete.',
-							lnumber, .doc)
-						break
-					}
-
-					continue
-				}
-
-				if prev_line.contains('}') { // We've looked back to the above scope, stop here
+				} else if prev_line.starts_with('// ${fn_name}')
+					&& !prev_prev_line.starts_with('//') {
+					grab = false
+					clean_line := line.all_before_last('{').trim(' ')
+					vt.warn('The documentation for "${clean_line}" seems incomplete.',
+						lnumber, .doc)
 					break
-				} else if prev_line.starts_with('[') {
-					tags << collect_tags(prev_line)
-					continue
 				}
+
+				continue
 			}
-			if grab {
-				clean_line := line.all_before_last('{').trim(' ')
-				vt.warn('A function name is missing from the documentation of "${clean_line}".',
-					lnumber, .doc)
+
+			if prev_line.contains('}') { // We've looked back to the above scope, stop here
+				break
+			} else if prev_line.starts_with('[') {
+				tags << collect_tags(prev_line)
+				continue
 			}
+		}
+		if grab {
+			clean_line := line.all_before_last('{').trim(' ')
+			vt.warn('A function name is missing from the documentation of "${clean_line}".',
+				lnumber, .doc)
 		}
 	}
 }
@@ -286,7 +289,11 @@ fn (mut vt Vet) expr(expr ast.Expr) {
 		}
 		ast.InfixExpr {
 			vt.vet_in_condition(expr)
+			vt.vet_empty_str(expr)
 			vt.expr(expr.right)
+		}
+		ast.ParExpr {
+			vt.expr(expr.expr)
 		}
 		ast.CallExpr {
 			vt.expr(expr.left)
@@ -314,6 +321,44 @@ fn (mut vt Vet) const_decl(stmt ast.ConstDecl) {
 				.unknown)
 		}
 		vt.expr(field.expr)
+	}
+}
+
+fn (mut vt Vet) vet_empty_str(expr ast.InfixExpr) {
+	if expr.left is ast.InfixExpr {
+		vt.expr(expr.left)
+	} else if expr.right is ast.InfixExpr {
+		vt.expr(expr.right)
+	} else if expr.left is ast.SelectorExpr && expr.right is ast.IntegerLiteral {
+		operand := (expr.left as ast.SelectorExpr) // TODO: remove as-casts when multiple conds can be smart-casted.
+		if operand.expr is ast.Ident && operand.expr.info.typ == ast.string_type_idx
+			&& operand.field_name == 'len' {
+			if expr.op != .lt && expr.right.val == '0' {
+				// Case: `var.len > 0`, `var.len == 0`, `var.len != 0`
+				op := if expr.op == .gt { '!=' } else { expr.op.str() }
+				vt.notice("Use `${operand.expr.name} ${op} ''` instead of `${operand.expr.name}.len ${expr.op} 0`",
+					expr.pos.line_nr, .unknown)
+			} else if expr.op == .lt && expr.right.val == '1' {
+				// Case: `var.len < 1`
+				vt.notice("Use `${operand.expr.name} == ''` instead of `${operand.expr.name}.len ${expr.op} 1`",
+					expr.pos.line_nr, .unknown)
+			}
+		}
+	} else if expr.left is ast.IntegerLiteral && expr.right is ast.SelectorExpr {
+		operand := expr.right
+		if operand.expr is ast.Ident && operand.expr.info.typ == ast.string_type_idx
+			&& operand.field_name == 'len' {
+			if expr.op != .gt && (expr.left as ast.IntegerLiteral).val == '0' {
+				// Case: `0 < var.len`, `0 == var.len`, `0 != var.len`
+				op := if expr.op == .lt { '!=' } else { expr.op.str() }
+				vt.notice("Use `'' ${op} ${operand.expr.name}` instead of `0 ${expr.op} ${operand.expr.name}.len`",
+					expr.pos.line_nr, .unknown)
+			} else if expr.op == .gt && (expr.left as ast.IntegerLiteral).val == '1' {
+				// Case: `1 > var.len`
+				vt.notice("Use `'' == ${operand.expr.name}` instead of `1 ${expr.op} ${operand.expr.name}.len`",
+					expr.pos.line_nr, .unknown)
+			}
+		}
 	}
 }
 

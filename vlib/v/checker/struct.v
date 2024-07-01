@@ -14,6 +14,13 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 	mut struct_sym, struct_typ_idx := c.table.find_sym_and_type_idx(node.name)
 	mut has_generic_types := false
 	if mut struct_sym.info is ast.Struct {
+		for mut symfield in struct_sym.info.fields {
+			symfield.container_typ = struct_typ_idx
+			if struct_sym.info.is_union {
+				symfield.is_part_of_union = true
+			}
+		}
+
 		if node.language == .v && !c.is_builtin_mod && !struct_sym.info.is_anon {
 			c.check_valid_pascal_case(node.name, 'struct name', node.pos)
 		}
@@ -191,6 +198,15 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 				c.expected_type = field.typ
 				if !field.typ.has_flag(.option) && !field.typ.has_flag(.result) {
 					c.check_expr_option_or_result_call(field.default_expr, field.default_expr_typ)
+				}
+				if sym.info is ast.ArrayFixed && field.typ == field.default_expr_typ {
+					if sym.info.size_expr is ast.ComptimeCall {
+						// field [$d('x' ,2)]int = [1 ,2]!
+						if sym.info.size_expr.method_name == 'd' {
+							c.error('cannot initialize a fixed size array field that uses `\$d()` as size quantifier since the size may change via -d',
+								field.default_expr.pos())
+						}
+					}
 				}
 				interface_implemented := sym.kind == .interface_
 					&& c.type_implements(field.default_expr_typ, field.typ, field.pos)
@@ -442,7 +458,7 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 	// but `x := T{}` is ok.
 	if !c.is_builtin_mod && !c.inside_unsafe && type_sym.language == .v
 		&& c.table.cur_concrete_types.len == 0 {
-		pos := type_sym.name.index_u8_last(`.`)
+		pos := type_sym.name.last_index_u8(`.`)
 		first_letter := type_sym.name[pos + 1]
 		if !first_letter.is_capital() && (type_sym.kind != .struct_
 			|| !(type_sym.info is ast.Struct && type_sym.info.is_anon))
@@ -698,7 +714,8 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				node.init_fields[i].typ = got_type
 				node.init_fields[i].expected_type = exp_type
 
-				if got_type.is_ptr() && exp_type.is_ptr() && mut init_field.expr is ast.Ident {
+				if got_type.is_ptr() && exp_type.is_ptr() && mut init_field.expr is ast.Ident
+					&& !info.is_heap {
 					c.fail_if_stack_struct_action_outside_unsafe(mut init_field.expr,
 						'assigned')
 				}
@@ -750,10 +767,8 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 									} else {
 										parts.last()
 									}
-									c.add_error_detail('this will become an error after 2024-05-31')
-									c.warn('initalizing private field `${field.name}` of `${mod_type}`',
+									c.error('cannot access private field `${field.name}` on `${mod_type}`',
 										init_field.pos)
-									// c.error('cannot access private field `${field.name}` on `${mod_type}`', init_field.pos)
 									break
 								}
 							}
@@ -841,12 +856,22 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 						node.pos)
 				}
 				if !node.has_update_expr && !field.has_default_expr && !field.typ.is_ptr()
-					&& !field.typ.has_flag(.option) && c.table.final_sym(field.typ).kind == .struct_ {
-					mut zero_struct_init := ast.StructInit{
-						pos: node.pos
-						typ: field.typ
+					&& !field.typ.has_flag(.option) {
+					field_final_sym := c.table.final_sym(field.typ)
+					if field_final_sym.kind == .struct_ {
+						mut zero_struct_init := ast.StructInit{
+							pos: node.pos
+							typ: field.typ
+						}
+						if field.is_part_of_union {
+							if field.name in inited_fields {
+								// fields that are part of an union, should only be checked, when they are explicitly initialised
+								c.struct_init(mut zero_struct_init, true, mut inited_fields)
+							}
+						} else {
+							c.struct_init(mut zero_struct_init, true, mut inited_fields)
+						}
 					}
-					c.struct_init(mut zero_struct_init, true, mut inited_fields)
 				}
 			}
 			for embed in info.embeds {

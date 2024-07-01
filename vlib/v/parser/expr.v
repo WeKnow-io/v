@@ -251,8 +251,10 @@ fn (mut p Parser) check_expr(precedence int) !ast.Expr {
 				expr := p.expr(0)
 				p.check(.rpar)
 				if p.tok.kind != .dot && p.tok.line_nr == p.prev_tok.line_nr {
-					p.warn_with_pos('use e.g. `typeof(expr).name` or `sum_type_instance.type_name()` instead',
-						spos)
+					if !p.inside_unsafe {
+						p.warn_with_pos('use e.g. `typeof(expr).name` or `sum_type_instance.type_name()` instead',
+							spos)
+					}
 				}
 				node = ast.TypeOf{
 					is_type: false
@@ -840,11 +842,17 @@ fn (mut p Parser) process_custom_orm_operators() {
 	}
 
 	is_like_operator := p.tok.kind == .name && p.tok.lit == 'like'
+	is_ilike_operator := p.tok.kind == .name && p.tok.lit == 'ilike'
 
 	if is_like_operator {
 		p.tok = token.Token{
 			...p.tok
 			kind: .key_like
+		}
+	} else if is_ilike_operator {
+		p.tok = token.Token{
+			...p.tok
+			kind: .key_ilike
 		}
 	}
 }

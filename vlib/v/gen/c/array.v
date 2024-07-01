@@ -94,7 +94,7 @@ fn (mut g Gen) fixed_array_init(node ast.ArrayInit, array_type Type, var_name st
 
 		ret_typ := g.typ(node.typ)
 		elem_typ := g.typ(node.elem_type)
-		if var_name.len == 0 {
+		if var_name == '' {
 			g.write('${ret_typ} ${past.tmp_var} =')
 		}
 		g.write('{')
@@ -300,7 +300,7 @@ fn (mut g Gen) array_init_with_fields(node ast.ArrayInit, elem_type Type, is_amp
 
 		ret_typ := g.typ(node.typ)
 		elem_typ := g.typ(node.elem_type)
-		if var_name.len == 0 {
+		if var_name == '' {
 			g.write('${ret_typ} ${past.tmp_var} =')
 		}
 		if is_default_array {
@@ -1146,10 +1146,13 @@ fn (mut g Gen) gen_array_index(node ast.CallExpr) {
 	}
 	g.expr(node.left)
 	g.write(', ')
-	if node.args[0].expr.is_auto_deref_var() {
+
+	elem_typ := g.table.sym(node.left_type).array_info().elem_type
+	// auto deref var is redundant for interfaces and sum types.
+	if node.args[0].expr.is_auto_deref_var()
+		&& g.table.sym(elem_typ).kind !in [.interface_, .sum_type] {
 		g.write('*')
 	}
-	elem_typ := g.table.sym(node.left_type).array_info().elem_type
 	if g.table.sym(elem_typ).kind in [.interface_, .sum_type] {
 		g.expr_with_cast(node.args[0].expr, node.args[0].typ, elem_typ)
 	} else {

@@ -5,6 +5,7 @@ module ast
 
 import v.token
 import v.errors
+import v.util
 import v.pref
 
 pub type TypeDecl = AliasTypeDecl | FnTypeDecl | SumTypeDecl
@@ -341,6 +342,8 @@ pub:
 	is_deprecated    bool
 pub mut:
 	is_recursive     bool
+	is_part_of_union bool
+	container_typ    Type
 	default_expr     Expr
 	default_expr_typ Type
 	name             string
@@ -771,6 +774,7 @@ pub mut:
 	receiver_type          Type // User / T, if receiver is generic, then cgen requires receiver_type to be T
 	receiver_concrete_type Type // if receiver_type is T, then receiver_concrete_type is concrete type, otherwise it is the same as receiver_type
 	return_type            Type
+	return_type_generic    Type   // the original generic return type from fn def
 	fn_var_type            Type   // the fn type, when `is_fn_a_const` or `is_fn_var` is true
 	const_name             string // the fully qualified name of the const, i.e. `main.c`, given `const c = abc`, and callexpr: `c()`
 	should_be_skipped      bool   // true for calls to `[if someflag?]` functions, when there is no `-d someflag`
@@ -822,6 +826,7 @@ pub enum ComptimeVarKind {
 	value_var // map value from `for k,v in t.$(field.name)`
 	field_var // comptime field var `a := t.$(field.name)`
 	generic_param // generic fn parameter
+	generic_var // generic var
 	smartcast // smart cast when used in `is v` (when `v` is from $for .variants)
 }
 
@@ -986,7 +991,7 @@ pub type IdentInfo = IdentFn | IdentVar
 
 pub enum IdentKind {
 	unresolved
-	blank_ident
+	blank_ident // discard identifier, `_` in `_ := 1`
 	variable
 	constant
 	global
@@ -1007,11 +1012,25 @@ pub mut:
 	obj            ScopeObject
 	mod            string
 	name           string
+	full_name      string
 	kind           IdentKind
 	info           IdentInfo
 	is_mut         bool // if mut *token* is before name. Use `is_mut()` to lookup mut variable
 	or_expr        OrExpr
 	concrete_types []Type
+}
+
+// full_name returns the name of the ident, prefixed with the module name
+pub fn (mut i Ident) full_name() string {
+	if i.full_name != '' {
+		return i.full_name
+	}
+	if i.name.contains('.') {
+		i.full_name = i.name
+	} else {
+		i.full_name = i.mod + '.' + i.name
+	}
+	return i.full_name
 }
 
 pub fn (i &Ident) is_auto_heap() bool {
@@ -1310,6 +1329,7 @@ pub mut:
 	is_volatile   bool // for disabling variable access optimisations (needed for hardware drivers)
 	is_simple     bool // `x+=2` in `for x:=1; ; x+=2`
 	has_cross_var bool
+	attr          Attr
 }
 
 // `expr as Ident`
@@ -1910,26 +1930,68 @@ pub mut:
 @[minify]
 pub struct ComptimeCall {
 pub:
-	pos          token.Pos
-	has_parens   bool // if $() is used, for vfmt
-	method_name  string
-	method_pos   token.Pos
-	scope        &Scope = unsafe { nil }
-	is_vweb      bool
-	is_embed     bool
-	is_env       bool
-	env_pos      token.Pos
-	is_pkgconfig bool
+	pos              token.Pos
+	has_parens       bool // if $() is used, for vfmt
+	method_name      string
+	method_pos       token.Pos
+	scope            &Scope = unsafe { nil }
+	is_vweb          bool
+	is_embed         bool // $embed_file(...)
+	is_env           bool // $env(...) // TODO: deprecate after $d() is stable
+	is_compile_value bool // $d(...)
+	env_pos          token.Pos
+	is_pkgconfig     bool
+mut:
+	is_d_resolved bool
 pub mut:
-	vweb_tmpl   File
-	left        Expr
-	left_type   Type
-	result_type Type
-	env_value   string
-	args_var    string
-	args        []CallArg
-	embed_file  EmbeddedFile
-	or_block    OrExpr
+	vweb_tmpl     File
+	left          Expr
+	left_type     Type
+	result_type   Type
+	env_value     string
+	compile_value string
+	args_var      string
+	args          []CallArg
+	embed_file    EmbeddedFile
+	or_block      OrExpr
+}
+
+// resolve_compile_value resolves the value and return type of `$d()` calls.
+// The result is stored in fields `compile_value` and `result_type`.
+// The argument `compile_values` is expected to be the `Preferences.compile_values` field.
+pub fn (mut cc ComptimeCall) resolve_compile_value(compile_values map[string]string) ! {
+	if cc.is_d_resolved {
+		return
+	}
+	if !cc.is_compile_value {
+		return error('ComptimeCall is not \$d()')
+	}
+	arg := cc.args[0] or {
+		return error('\$d() takes two arguments, a string and a primitive literal')
+	}
+	if !arg.expr.is_pure_literal() {
+		return error('\$d() values can only be pure literals')
+	}
+	typ := arg.expr.get_pure_type()
+	arg_as_string := arg.str().trim('`"\'')
+	value := compile_values[cc.args_var] or { arg_as_string }
+	validate_type_string_is_pure_literal(typ, value) or { return error(err.msg()) }
+	cc.compile_value = value
+	cc.result_type = typ
+	cc.is_d_resolved = true
+}
+
+// expr_str returns the string representation of `ComptimeCall` for use with
+// `ast.Expr`'s `str()' method (used by e.g. vfmt).
+pub fn (cc ComptimeCall) expr_str() string {
+	mut str := 'ast.ComptimeCall'
+	if cc.is_compile_value {
+		arg := cc.args[0] or { return str }
+		if arg.expr.is_pure_literal() {
+			str = "\$${cc.method_name}('${cc.args_var}', ${arg})"
+		}
+	}
+	return str
 }
 
 pub struct None {
@@ -2523,5 +2585,37 @@ pub fn type_can_start_with_token(tok &token.Token) bool {
 		else {
 			false
 		}
+	}
+}
+
+// validate_type_string_is_pure_literal returns `Error` if `str` can not be converted
+// to pure literal `typ` (`i64`, `f64`, `bool`, `char` or `string`).
+pub fn validate_type_string_is_pure_literal(typ Type, str string) ! {
+	if typ == bool_type {
+		if !(str == 'true' || str == 'false') {
+			return error('bool literal `true` or `false` expected, found "${str}"')
+		}
+	} else if typ == char_type {
+		if str.starts_with('\\') {
+			if str.len <= 1 {
+				return error('empty escape sequence found')
+			}
+			if !util.is_escape_sequence(str[1]) {
+				return error('char literal escape sequence expected, found "${str}"')
+			}
+		} else if str.len != 1 {
+			return error('char literal expected, found "${str}"')
+		}
+	} else if typ == f64_type {
+		if str.count('.') != 1 {
+			return error('f64 literal expected, found "${str}"')
+		}
+	} else if typ == string_type {
+	} else if typ == i64_type {
+		if !str.is_int() {
+			return error('i64 literal expected, found "${str}"')
+		}
+	} else {
+		return error('expected pure literal, found "${str}"')
 	}
 }

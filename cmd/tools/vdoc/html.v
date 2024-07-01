@@ -64,7 +64,8 @@ fn (vd VDoc) render_search_index(out Output) {
 	for i, title in vd.search_module_index {
 		data := vd.search_module_data[i]
 		js_search_index.write_string('"${title}",\n')
-		js_search_data.write_string('["${data.description}","${data.link}"],\n')
+		description := data.description.replace('\n', '').replace('\r', '') // fix multiline js string bug
+		js_search_data.write_string('["${description}","${data.link}"],\n')
 	}
 	js_search_index.writeln('];\n')
 	js_search_index.write_string('var searchIndex = [\n')
@@ -536,7 +537,7 @@ fn doc_node_html(dn doc.DocNode, link string, head bool, include_examples bool, 
 		} else {
 			dnw.write_string('${tabs(3)}<div class="title"><${head_tag}>${dn.kind} ${sym_name}${hash_link}</${head_tag}>')
 		}
-		if link.len != 0 {
+		if link != '' {
 			dnw.write_string('<a class="link" rel="noreferrer" target="_blank" href="${link}">${link_svg}</a>')
 		}
 		dnw.write_string('</div>\n')

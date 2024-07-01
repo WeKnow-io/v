@@ -203,6 +203,9 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				.array {
 					if left_sym.kind !in [.sum_type, .interface_] {
 						elem_type := right_final_sym.array_info().elem_type
+						if node.left.is_auto_deref_var() {
+							left_type = left_type.deref()
+						}
 						c.check_expected(left_type, elem_type) or {
 							c.error('left operand to `${node.op}` does not match the array element type: ${err.msg()}',
 								left_right_pos)
@@ -214,6 +217,9 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 							}
 						} else {
 							elem_type := right_final_sym.array_info().elem_type
+							if node.left.is_auto_deref_var() {
+								left_type = left_type.deref()
+							}
 							c.check_expected(left_type, elem_type) or {
 								c.error('left operand to `${node.op}` does not match the array element type: ${err.msg()}',
 									left_right_pos)
@@ -264,14 +270,16 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			left_sym = c.table.sym(unwrapped_left_type)
 			unwrapped_right_type := c.unwrap_generic(right_type)
 			right_sym = c.table.sym(unwrapped_right_type)
-			if mut right_sym.info is ast.Alias && right_sym.info.language != .c
+			if mut right_sym.info is ast.Alias && (right_sym.info.language != .c
 				&& c.mod == c.table.type_to_str(unwrapped_right_type).split('.')[0]
-				&& c.table.sym(right_sym.info.parent_type).is_primitive() {
+				&& (c.table.sym(right_sym.info.parent_type).is_primitive()
+				|| c.table.sym(right_sym.info.parent_type).kind == .enum_)) {
 				right_sym = c.table.sym(right_sym.info.parent_type)
 			}
-			if mut left_sym.info is ast.Alias && left_sym.info.language != .c
+			if mut left_sym.info is ast.Alias && (left_sym.info.language != .c
 				&& c.mod == c.table.type_to_str(unwrapped_left_type).split('.')[0]
-				&& c.table.sym(left_sym.info.parent_type).is_primitive() {
+				&& (c.table.sym(left_sym.info.parent_type).is_primitive()
+				|| c.table.sym(left_sym.info.parent_type).kind == .enum_)) {
 				left_sym = c.table.sym(left_sym.info.parent_type)
 			}
 
@@ -329,6 +337,12 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 							left_right_pos)
 					}
 				}
+			}
+
+			if ((unwrapped_left_type.is_ptr() && !node.left.is_auto_deref_var())
+				|| (unwrapped_right_type.is_ptr() && !node.right.is_auto_deref_var()))
+				&& node.op !in [.plus, .minus] {
+				c.error('infix `${node.op}` is not defined for pointer values', left_right_pos)
 			}
 
 			if !c.pref.translated && left_sym.kind in [.array, .array_fixed, .map, .struct_] {
@@ -427,7 +441,27 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					c.check_div_mod_by_zero(node.right, node.op)
 				}
 
-				return_type = promoted_type
+				left_sym = c.table.sym(unwrapped_left_type)
+				right_sym = c.table.sym(unwrapped_right_type)
+				if left_sym.info is ast.Alias
+					&& c.table.sym(left_sym.info.parent_type).is_primitive() {
+					if left_sym.has_method(node.op.str()) {
+						if method := left_sym.find_method(node.op.str()) {
+							return_type = method.return_type
+						}
+					}
+				} else if right_sym.info is ast.Alias
+					&& c.table.sym(right_sym.info.parent_type).is_primitive() {
+					if right_sym.has_method(node.op.str()) {
+						if method := right_sym.find_method(node.op.str()) {
+							return_type = method.return_type
+						}
+					}
+				}
+				return_sym := c.table.sym(return_type)
+				if return_sym.info !is ast.Alias {
+					return_type = promoted_type
+				}
 			}
 		}
 		.gt, .lt, .ge, .le {
@@ -510,6 +544,11 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			}
 		}
 		.key_like {
+			node.promoted_type = ast.bool_type
+
+			return c.check_like_operator(node)
+		}
+		.key_ilike {
 			node.promoted_type = ast.bool_type
 
 			return c.check_like_operator(node)
@@ -718,7 +757,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					c.error('cannot push `${c.table.type_to_str(right_type)}` on `${left_sym.name}`',
 						right_pos)
 				}
-				c.stmts_ending_with_expression(mut node.or_block.stmts)
+				c.stmts_ending_with_expression(mut node.or_block.stmts, c.expected_or_type)
 			} else {
 				c.error('cannot push on non-channel `${left_sym.name}`', left_pos)
 			}
@@ -726,10 +765,10 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		}
 		.and, .logical_or {
 			if !c.pref.translated && !c.file.is_translated {
-				if node.left_type != ast.bool_type_idx {
+				if left_final_sym.kind != .bool {
 					c.error('left operand for `${node.op}` is not a boolean', node.left.pos())
 				}
-				if node.right_type != ast.bool_type_idx {
+				if right_final_sym.kind != .bool {
 					c.error('right operand for `${node.op}` is not a boolean', node.right.pos())
 				}
 			}
@@ -841,6 +880,10 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					left_right_pos)
 			}
 		}
+	}
+	if node.op == .plus && c.pref.warn_about_allocs && left_type == ast.string_type_idx
+		&& right_type == ast.string_type_idx {
+		c.warn_alloc('string concatenation', node.pos)
 	}
 	/*
 	if (node.left is ast.InfixExpr && node.left.op == .inc) ||
